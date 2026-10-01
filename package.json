@@ -1,0 +1,50 @@
+{
+  "name": "aide",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "prisma db push --schema=database/schema/schema.prisma",
+    "db:generate": "prisma generate --schema=database/schema/schema.prisma",
+    "db:studio": "prisma studio --schema=database/schema/schema.prisma",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
+    "@react-three/postprocessing": "^3.1.2",
+    "@types/three": "^0.186.0",
+    "@upstash/ratelimit": "^2.0.3",
+    "@upstash/redis": "^1.34.0",
+    "bcryptjs": "^2.4.3",
+    "highlight.js": "^11.12.0",
+    "next": "^14.2.13",
+    "next-auth": "^4.24.8",
+    "postprocessing": "^6.39.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "three": "^0.186.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20.16.5",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.13",
+    "postcss": "^8.4.47",
+    "prisma": "^5.20.0",
+    "tailwindcss": "^3.4.11",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  }
+}

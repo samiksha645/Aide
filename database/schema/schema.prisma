@@ -1,0 +1,67 @@
+// Prisma schema for Aide
+// Run `npx prisma db push --schema=database/schema/schema.prisma` after filling in DATABASE_URL in .env.local
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  hashedPassword String
+  createdAt      DateTime       @default(now())
+  conversations  Conversation[]
+  memories       Memory[]
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String    @default("New conversation")
+  pinned    Boolean   @default(false)
+  archived  Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  messages  Message[]
+
+  @@index([userId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // "user" | "assistant"
+  content        String
+  tokenCount     Int          @default(0)
+  costUsd        Float        @default(0)
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+}
+
+// SECURITY & PRIVACY NOTE:
+// The `content` field stores personal memories extracted from user interactions.
+// To protect sensitive user information at rest:
+// 1. Password Hashing: Use bcrypt with cost factor 12 (or `@node-rs/argon2` with memory parameter 65536) for authentication.
+// 2. Memory Content Encryption: Encrypt `content` at the application layer before saving to Postgres using AES-256-GCM (via Node `crypto` or `@node-rs/argon2` derived keys).
+// 3. Vector Embeddings: The `embedding` field uses pgvector vector(1536) for semantic similarity search (OpenAI text-embedding-3-small).
+model Memory {
+  id                   String                 @id @default(cuid())
+  userId               String
+  user                 User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content              String
+// embedding Unsupported("vector(1536)")?
+  memoryType           String                 @default("fact")
+  sourceConversationId String?
+  createdAt            DateTime               @default(now())
+  lastAccessedAt       DateTime               @default(now())
+
+  @@index([userId])
+}

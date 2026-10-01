@@ -1,0 +1,16 @@
+import { Redis } from "@upstash/redis";
+import { Ratelimit } from "@upstash/ratelimit";
+
+// Create an Upstash Redis client instance
+export const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL || "",
+  token: process.env.UPSTASH_REDIS_REST_TOKEN || "",
+});
+
+// Configure rate limiter: 10 requests per 10 seconds per IP/User
+export const rateLimiter = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(10, "10 s"),
+  analytics: true,
+  prefix: "@upstash/ratelimit",
+});
