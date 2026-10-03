@@ -8,6 +8,7 @@ export interface MemoryItem {
   id: string;
   content: string;
   createdAt: string;
+  memoryType?: string;
 }
 
 interface SettingsModalProps {
@@ -44,6 +45,7 @@ export function SettingsModal({
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loadingMemories, setLoadingMemories] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const [memoryMode, setMemoryMode] = useState<"ask" | "auto">("ask");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   useEffect(() => {
@@ -51,6 +53,10 @@ export function SettingsModal({
       const saved = localStorage.getItem("aide-memory-enabled");
       if (saved !== null) {
         setMemoryEnabled(saved === "true");
+      }
+      const savedMode = localStorage.getItem("aide-memory-mode") as "ask" | "auto";
+      if (savedMode === "ask" || savedMode === "auto") {
+        setMemoryMode(savedMode);
       }
     }
   }, []);
@@ -104,6 +110,11 @@ export function SettingsModal({
   const handleToggleMemoryEnabled = (enabled: boolean) => {
     setMemoryEnabled(enabled);
     localStorage.setItem("aide-memory-enabled", String(enabled));
+  };
+
+  const handleToggleMemoryMode = (mode: "ask" | "auto") => {
+    setMemoryMode(mode);
+    localStorage.setItem("aide-memory-mode", mode);
   };
 
   if (!isOpen) return null;
@@ -254,6 +265,34 @@ export function SettingsModal({
                 </button>
               </div>
 
+              {memoryEnabled && (
+                <div className="flex flex-col gap-1.5 pb-2 border-b border-cream-200 dark:border-charcoal-800">
+                  <label className="text-sm font-medium text-stone-800 dark:text-stone-200">Save behavior</label>
+                  <div className="flex bg-cream-100 dark:bg-charcoal-800 rounded-lg p-1">
+                    <button
+                      onClick={() => handleToggleMemoryMode("ask")}
+                      className={`flex-1 text-xs py-1.5 rounded-md font-medium transition ${
+                        memoryMode === "ask"
+                          ? "bg-white dark:bg-charcoal-600 text-stone-900 dark:text-white shadow-sm"
+                          : "text-stone-500 hover:text-stone-700 dark:hover:text-stone-300"
+                      }`}
+                    >
+                      Ask before saving
+                    </button>
+                    <button
+                      onClick={() => handleToggleMemoryMode("auto")}
+                      className={`flex-1 text-xs py-1.5 rounded-md font-medium transition ${
+                        memoryMode === "auto"
+                          ? "bg-white dark:bg-charcoal-600 text-stone-900 dark:text-white shadow-sm"
+                          : "text-stone-500 hover:text-stone-700 dark:hover:text-stone-300"
+                      }`}
+                    >
+                      Save automatically
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Clear All Confirmation Dialog */}
               {showClearConfirm ? (
                 <div className="p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-xl space-y-3">
@@ -288,8 +327,8 @@ export function SettingsModal({
                 )
               )}
 
-              {/* Memory List */}
-              <div className="flex-1 overflow-y-auto max-h-60 space-y-2 pr-1">
+              {/* Memory List — grouped by category */}
+              <div className="flex-1 overflow-y-auto space-y-4 pr-1">
                 {loadingMemories ? (
                   <div className="flex items-center justify-center h-32 text-stone-400 text-xs">
                     <span className="w-2 h-2 rounded-full bg-warmorange-400 animate-ping mr-2"></span>
@@ -299,27 +338,50 @@ export function SettingsModal({
                   <div className="text-center py-10 text-stone-400 dark:text-stone-500 text-xs">
                     No durable memories saved yet.
                   </div>
-                ) : (
-                  memories.map((m) => (
-                    <div
-                      key={m.id}
-                      className="group bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3 text-xs flex justify-between items-start space-x-2 transition"
-                    >
-                      <span className="text-stone-800 dark:text-stone-200 leading-relaxed">
-                        {m.content}
-                      </span>
-                      <button
-                        onClick={() => handleDeleteMemory(m.id)}
-                        className="text-stone-400 hover:text-red-500 p-0.5 rounded transition shrink-0 opacity-0 group-hover:opacity-100"
-                        title="Delete memory"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))
-                )}
+                ) : (() => {
+                  const CATEGORIES = [
+                    { key: "Personal", label: "Personal", emoji: "👤", badgeClass: "bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-700/40" },
+                    { key: "Preferences", label: "Preferences", emoji: "⚙️", badgeClass: "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-700/40" },
+                    { key: "Interests", label: "Interests", emoji: "✨", badgeClass: "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700/40" },
+                    { key: "other", label: "Other", emoji: "📌", badgeClass: "bg-stone-100 dark:bg-charcoal-800 text-stone-600 dark:text-stone-400 border-stone-200 dark:border-charcoal-700" },
+                  ];
+                  return CATEGORIES.map(({ key, label, emoji, badgeClass }) => {
+                    const group = memories.filter((m) => {
+                      const t = (m.memoryType || "fact").toLowerCase();
+                      if (key === "other") return !["personal","preferences","interests"].includes(t);
+                      return t.toLowerCase() === key.toLowerCase();
+                    });
+                    if (group.length === 0) return null;
+                    return (
+                      <div key={key}>
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold px-1 mb-1.5 border-b pb-1 border-cream-200 dark:border-charcoal-800">
+                          <span>{emoji}</span>
+                          <span className={`px-1.5 py-0.5 rounded-full border ${badgeClass}`}>{label}</span>
+                          <span className="text-stone-400 dark:text-stone-500 ml-auto font-normal">{group.length}</span>
+                        </div>
+                        <div className="space-y-1.5">
+                          {group.map((m) => (
+                            <div
+                              key={m.id}
+                              className="group bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3 text-xs flex justify-between items-start gap-2 transition"
+                            >
+                              <span className="text-stone-800 dark:text-stone-200 leading-relaxed">{m.content}</span>
+                              <button
+                                onClick={() => handleDeleteMemory(m.id)}
+                                className="text-stone-400 hover:text-red-500 p-0.5 rounded transition shrink-0 opacity-0 group-hover:opacity-100"
+                                title="Delete memory"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
           )}

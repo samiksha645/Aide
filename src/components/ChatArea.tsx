@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import dynamic from "next/dynamic";
+import { MemoryPromptCard } from "./MemoryPromptCard";
 
 // Dynamic import with ssr: false ensures WebGL / canvas code only executes in the browser
 const ThreeOrb = dynamic(
@@ -39,7 +40,7 @@ interface ChatAreaProps {
   messages: Message[];
   input: string;
   setInput: (val: string) => void;
-  onSend: () => void;
+  onSend: (textOverride?: string) => void;
   isStreaming: boolean;
   activeToolStep?: ToolStep | null;
   conversationTitle?: string;
@@ -57,6 +58,10 @@ interface ChatAreaProps {
   /** Selected model id (persisted by the parent) */
   model?: string;
   onModelChange?: (modelId: string) => void;
+  /** Pending memory fact waiting for user confirmation */
+  pendingMemory?: { fact: string; category: string; conversationId: string } | null;
+  onSaveMemory?: (fact: string, category: string, conversationId: string) => void;
+  onDiscardMemory?: (fact: string) => void;
 }
 
 import ReactMarkdown from "react-markdown";
@@ -286,6 +291,9 @@ export function ChatArea({
   onEditMessage,
   model = "aide-flash",
   onModelChange,
+  pendingMemory,
+  onSaveMemory,
+  onDiscardMemory,
 }: ChatAreaProps) {
   const [expandedMessageIds, setExpandedMessageIds] = React.useState<Record<string, boolean>>({});
 
@@ -293,10 +301,64 @@ export function ChatArea({
     setExpandedMessageIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const [attachedFile, setAttachedFile] = useState<{ name: string; text: string } | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadError(null);
+    setAttachedFile(null);
+    setIsUploading(true);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        let errorMsg = "Failed to extract text from file";
+        try {
+          const errData = await res.json();
+          if (errData.error) errorMsg = errData.error;
+        } catch { /* fallback to default */ }
+        throw new Error(errorMsg);
+      }
+
+      const data = await res.json();
+      setAttachedFile({ name: data.fileName, text: data.text });
+    } catch (err: any) {
+      setUploadError(err.message || "An error occurred");
+      setTimeout(() => setUploadError(null), 5000);
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleCustomSend = () => {
+    if (!input.trim() && !attachedFile) return;
+    
+    let textToSend = input;
+    if (attachedFile) {
+      textToSend = `<attachment filename="${attachedFile.name}">\n${attachedFile.text}\n</attachment>\n${input}`;
+      setAttachedFile(null);
+    }
+    
+    onSend(textToSend);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onSend();
+      handleCustomSend();
     }
   };
 
@@ -578,7 +640,23 @@ export function ChatArea({
                       </div>
                     ) : (
                       <div className="max-w-[85%] sm:max-w-[75%] w-fit bg-stone-200 dark:bg-charcoal-800 text-stone-800 dark:text-stone-100 rounded-3xl rounded-br-lg px-4 sm:px-5 py-3 text-sm leading-relaxed whitespace-pre-wrap shadow-sm" style={{ wordBreak: "break-word" }}>
-                        {msg.content}
+                        {(() => {
+                          const match = msg.content.match(/^<attachment filename="([^"]+)">\n([\s\S]*?)\n<\/attachment>\n([\s\S]*)$/);
+                          if (match) {
+                            return (
+                              <>
+                                <div className="flex items-center gap-2 mb-2 bg-stone-300/50 dark:bg-charcoal-700/50 px-3 py-2 rounded-xl text-xs font-medium border border-stone-300 dark:border-charcoal-700">
+                                  <svg className="w-4 h-4 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                  </svg>
+                                  <span className="truncate max-w-[200px]">{match[1]}</span>
+                                </div>
+                                {match[3]}
+                              </>
+                            );
+                          }
+                          return msg.content;
+                        })()}
                       </div>
                     )}
 
@@ -711,6 +789,17 @@ export function ChatArea({
             </div>
           </div>
         )}
+
+        {/* Memory confirmation card */}
+        {pendingMemory && !isStreaming && onSaveMemory && onDiscardMemory && (
+          <MemoryPromptCard
+            fact={pendingMemory.fact}
+            category={pendingMemory.category}
+            conversationId={pendingMemory.conversationId}
+            onSave={onSaveMemory}
+            onDiscard={onDiscardMemory}
+          />
+        )}
         </div>
       </div>
 
@@ -780,51 +869,95 @@ export function ChatArea({
           </div>
 
           {/* Auto-growing composer (Enter to send, Shift+Enter for newline) */}
-          <div className="flex items-end space-x-2 bg-white dark:bg-charcoal-800 border border-cream-300 dark:border-charcoal-750 focus-within:border-warmorange-400 focus-within:ring-2 focus-within:ring-warmorange-400/20 rounded-3xl px-3.5 sm:px-4 py-2 shadow-sm transition">
-            {/* Attachment icon */}
-            <button
-              type="button"
-              className="text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 transition p-1 shrink-0"
-              title="Attach file (preview)"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-              </svg>
-            </button>
+          <div className="flex flex-col bg-white dark:bg-charcoal-800 border border-cream-300 dark:border-charcoal-750 focus-within:border-warmorange-400 focus-within:ring-2 focus-within:ring-warmorange-400/20 rounded-3xl shadow-sm transition overflow-hidden">
+            
+            {/* File attachment preview chip */}
+            {(attachedFile || isUploading || uploadError) && (
+              <div className="flex items-center px-4 pt-3 pb-1 gap-2">
+                {uploadError ? (
+                  <div className="flex items-center bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-3 py-1.5 rounded-lg text-[11px] font-medium">
+                    <span>⚠️ {uploadError}</span>
+                  </div>
+                ) : isUploading ? (
+                  <div className="flex items-center bg-cream-100 dark:bg-charcoal-750 text-stone-600 dark:text-stone-300 px-3 py-1.5 rounded-lg text-[11px] font-medium">
+                    <span className="w-3 h-3 border-2 border-stone-400 border-t-transparent rounded-full animate-spin mr-2" />
+                    Reading document...
+                  </div>
+                ) : attachedFile ? (
+                  <div className="flex items-center bg-cream-100 dark:bg-charcoal-750 text-stone-700 dark:text-stone-200 px-3 py-1.5 rounded-lg text-xs font-medium border border-cream-200 dark:border-charcoal-700">
+                    <svg className="w-3.5 h-3.5 mr-1.5 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <span className="truncate max-w-[150px] sm:max-w-[200px]">{attachedFile.name}</span>
+                    <button
+                      onClick={() => setAttachedFile(null)}
+                      className="ml-2 text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 transition"
+                      title="Remove file"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
 
-            {/* Text input (auto-grows to ~6 lines) */}
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask Aide anything..."
-              rows={1}
-              disabled={isStreaming}
-              className="flex-1 bg-transparent text-xs sm:text-sm text-stone-800 dark:text-stone-200 placeholder-stone-400 dark:placeholder-stone-500 outline-none resize-none overflow-y-auto max-h-[140px] py-1.5 leading-relaxed"
-            />
-
-            {/* Send / Stop button */}
-            {isStreaming ? (
+            <div className="flex items-end space-x-2 px-3.5 sm:px-4 py-2">
+              <input
+                type="file"
+                ref={fileInputRef}
+                className="hidden"
+                accept=".pdf,.docx,.txt,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={handleFileUpload}
+              />
+              {/* Attachment icon */}
               <button
-                onClick={() => onStop?.()}
-                className="w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-stone-200 dark:bg-charcoal-750 hover:bg-stone-300 dark:hover:bg-charcoal-800 text-stone-700 dark:text-stone-200 flex items-center justify-center transition shadow-sm shrink-0"
-                title="Stop generating"
+                type="button"
+                disabled={isUploading}
+                onClick={() => fileInputRef.current?.click()}
+                className="text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 disabled:opacity-50 transition p-1 shrink-0"
+                title="Attach file (PDF, DOCX, TXT)"
               >
-                <span className="w-2.5 h-2.5 bg-current rounded-[2px]" />
-              </button>
-            ) : (
-              <button
-                onClick={onSend}
-                disabled={!input.trim()}
-                className="w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-warmorange-500 hover:bg-warmorange-600 disabled:opacity-40 disabled:hover:bg-warmorange-500 text-white flex items-center justify-center transition shadow-sm shrink-0"
-                title="Send message"
-              >
-                <svg className="w-4 h-4 translate-x-px" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                 </svg>
               </button>
-            )}
+
+              {/* Text input (auto-grows to ~6 lines) */}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask Aide anything..."
+                rows={1}
+                disabled={isStreaming}
+                className="flex-1 bg-transparent text-xs sm:text-sm text-stone-800 dark:text-stone-200 placeholder-stone-400 dark:placeholder-stone-500 outline-none resize-none overflow-y-auto max-h-[140px] py-1.5 leading-relaxed"
+              />
+
+              {/* Send / Stop button */}
+              {isStreaming ? (
+                <button
+                  onClick={() => onStop?.()}
+                  className="w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-stone-200 dark:bg-charcoal-750 hover:bg-stone-300 dark:hover:bg-charcoal-800 text-stone-700 dark:text-stone-200 flex items-center justify-center transition shadow-sm shrink-0"
+                  title="Stop generating"
+                >
+                  <span className="w-2.5 h-2.5 bg-current rounded-[2px]" />
+                </button>
+              ) : (
+                <button
+                  onClick={handleCustomSend}
+                  disabled={(!input.trim() && !attachedFile) || isUploading}
+                  className="w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-warmorange-500 hover:bg-warmorange-600 disabled:opacity-40 disabled:hover:bg-warmorange-500 text-white flex items-center justify-center transition shadow-sm shrink-0"
+                  title="Send message"
+                >
+                  <svg className="w-4 h-4 translate-x-px" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Disclaimer */}

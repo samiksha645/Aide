@@ -33,6 +33,11 @@ export default function Home() {
   const [model, setModel] = useState("aide-flash");
   const abortRef = useRef<AbortController | null>(null);
 
+  // Pending memory: fact waiting for user confirmation before being saved
+  const [pendingMemory, setPendingMemory] = useState<{ fact: string; category: string; conversationId: string } | null>(null);
+  // Track facts discarded in this session so we don't re-prompt for the same thing
+  const discardedMemoriesRef = useRef<Set<string>>(new Set());
+
   const attemptDemoGuestLogin = useCallback(async () => {
     try {
       const res = await fetch("/api/auth/demo-guest", { method: "POST" });
@@ -223,6 +228,25 @@ export default function Home() {
     }
   }, []);
 
+  // Memory confirmation handlers
+  const handleSaveMemory = useCallback(async (fact: string, category: string, conversationId: string) => {
+    setPendingMemory(null);
+    try {
+      await fetch("/api/memories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: fact, category, conversationId }),
+      });
+    } catch (err) {
+      console.error("Failed to save memory:", err);
+    }
+  }, []);
+
+  const handleDiscardMemory = useCallback((fact: string) => {
+    discardedMemoriesRef.current.add(fact);
+    setPendingMemory(null);
+  }, []);
+
   if (status === "loading") {
     return (
       <div className="h-screen w-screen bg-warmtaupe-base dark:bg-charcoal-950 text-stone-500 dark:text-stone-400 flex items-center justify-center font-sans text-sm transition-colors duration-300">
@@ -310,10 +334,12 @@ export default function Home() {
     try {
       // Respect the user's memory preference from Settings → Memory
       let memoryEnabled = true;
+      let memoryMode = "ask"; // "ask" | "auto"
       try {
         memoryEnabled = localStorage.getItem("aide-memory-enabled") !== "false";
+        memoryMode = localStorage.getItem("aide-memory-mode") || "ask";
       } catch {
-        // Default to enabled if localStorage is unavailable
+        // Default to enabled + ask if localStorage is unavailable
       }
 
       const response = await fetch("/api/chat", {
@@ -321,6 +347,7 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
           "x-aide-memory": memoryEnabled ? "enabled" : "disabled",
+          "x-aide-memory-mode": memoryMode,
         },
         body: JSON.stringify({ conversationId: targetConvId, message: text }),
         signal: controller.signal,
@@ -388,6 +415,15 @@ export default function Home() {
                 setConversations((prev) =>
                   prev.map((c) => (c.id === targetConvId ? { ...c, title: parsed.title } : c))
                 );
+              } else if (parsed.type === "memory_pending" && parsed.content) {
+                // Show inline confirmation card only if this fact wasn't already discarded
+                if (!discardedMemoriesRef.current.has(parsed.content)) {
+                  setPendingMemory({ 
+                    fact: parsed.content, 
+                    category: parsed.category || "Personal", 
+                    conversationId: parsed.conversationId || targetConvId 
+                  });
+                }
               } else if (parsed.type === "text" || parsed.text) {
                 const textChunk = parsed.text || parsed.content || "";
                 assistantText += textChunk;
@@ -422,8 +458,9 @@ export default function Home() {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isStreaming) return;
+  const handleSend = async (textOverride?: string) => {
+    const textToSend = (textOverride || input).trim();
+    if (!textToSend || isStreaming) return;
 
     let targetConvId = activeId;
 
@@ -432,7 +469,7 @@ export default function Home() {
         const res = await fetch("/api/conversations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: input.trim().slice(0, 30) }),
+          body: JSON.stringify({ title: textToSend.slice(0, 30) }),
         });
         if (res.ok) {
           const data = await res.json();
@@ -448,7 +485,7 @@ export default function Home() {
 
     if (!targetConvId) return;
 
-    const userMsgText = input.trim();
+    const userMsgText = textToSend;
     setInput("");
     await runChatStream(userMsgText, targetConvId, true);
   };
@@ -559,6 +596,9 @@ export default function Home() {
         onEditMessage={handleEditMessage}
         model={model}
         onModelChange={handleModelChange}
+        pendingMemory={pendingMemory}
+        onSaveMemory={handleSaveMemory}
+        onDiscardMemory={handleDiscardMemory}
       />
 
       {/* 3. Settings Modal (General / Memory / Usage / Account) */}

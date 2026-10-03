@@ -74,34 +74,47 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 /**
  * Lightweight heuristic extraction prompt
  */
-export async function extractDurableFact(userMessage: string, assistantMessage: string): Promise<string | null> {
+export async function extractDurableFact(userMessage: string, assistantMessage: string): Promise<{ fact: string, category: string } | null> {
   const lower = userMessage.toLowerCase();
 
-  // Fast pattern match for explicit name statements ("my name is X", "I am X", "call me X", "name's X")
+  // Fast pattern match for explicit name statements
   const nameMatch = userMessage.match(/(?:my name is|name's|call me|i am)\s+([a-zA-Z]+)/i);
   if (nameMatch && nameMatch[1]) {
     const cleanName = nameMatch[1].trim();
     const reservedWords = ["a", "an", "the", "ready", "here", "fine", "good", "happy", "sorry", "tired", "using", "testing", "sure", "ok", "okay"];
     if (!reservedWords.includes(cleanName.toLowerCase())) {
       const formattedName = cleanName.charAt(0).toUpperCase() + cleanName.slice(1);
-      return `User's name is ${formattedName}`;
+      return { fact: `User's name is ${formattedName}`, category: "Personal" };
     }
   }
 
   // Fast pattern match for preferences / durable facts
   const prefMatch = userMessage.match(/\bi (?:like|love|prefer|work with|work on|use|build)\s+(.+)/i);
   if (prefMatch && prefMatch[1]) {
-    return `User preference: ${userMessage.trim()}`;
+    return { fact: `User preference: ${userMessage.trim()}`, category: "Preferences" };
   }
 
   if (isDemoMode()) {
-    if (lower.includes("like") || lower.includes("love") || lower.includes("working on") || lower.includes("prefer") || lower.includes("i am") || lower.includes("my name")) {
-      return `User stated: "${userMessage}"`;
+    if (lower.includes("like") || lower.includes("love") || lower.includes("prefer")) {
+      return { fact: `User stated: "${userMessage}"`, category: "Preferences" };
+    }
+    if (lower.includes("working on") || lower.includes("interested in")) {
+      return { fact: `User stated: "${userMessage}"`, category: "Interests" };
+    }
+    if (lower.includes("i am") || lower.includes("my name") || lower.includes("live in")) {
+      return { fact: `User stated: "${userMessage}"`, category: "Personal" };
     }
     return null;
   }
 
   // Real LLM call for extraction
+  const systemPrompt = `Analyze this exchange:
+User: "${userMessage}"
+Assistant: "${assistantMessage}"
+Is there a durable fact worth remembering about the user here? (preference, ongoing project, important personal detail). 
+If yes, return it as a valid JSON object: {"fact": "the short sentence fact", "category": "Personal" | "Preferences" | "Interests"}. 
+If no, respond with exactly "NULL". Do not use markdown blocks.`;
+
   try {
     if (process.env.GEMINI_API_KEY) {
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
@@ -109,26 +122,21 @@ export async function extractDurableFact(userMessage: string, assistantMessage: 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{
-                text: `Analyze this exchange:\nUser: "${userMessage}"\nAssistant: "${assistantMessage}"\nIs there a durable fact worth remembering about the user here? (preference, ongoing project, important personal detail). If yes, return it as a single short sentence. If no, respond with exactly "NULL".`
-              }],
-            },
-          ],
-          generationConfig: {
-            maxOutputTokens: 100,
-            temperature: 0.2,
-          },
+          contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
+          generationConfig: { maxOutputTokens: 150, temperature: 0.2 },
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
-        const result = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().replace(/^["']|["']$/g, "");
-        if (result && result.toUpperCase() !== "NULL") {
-          return result;
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (text && text.toUpperCase() !== "NULL") {
+          try {
+            const parsed = JSON.parse(text);
+            return parsed;
+          } catch {
+            return { fact: text, category: "Preferences" };
+          }
         }
       }
     } else if (process.env.ANTHROPIC_API_KEY) {
@@ -141,20 +149,22 @@ export async function extractDurableFact(userMessage: string, assistantMessage: 
         },
         body: JSON.stringify({
           model: "claude-3-5-sonnet-20240620",
-          max_tokens: 100,
-          messages: [
-            {
-              role: "user",
-              content: `Analyze this exchange:\nUser: "${userMessage}"\nAssistant: "${assistantMessage}"\nIs there a durable fact worth remembering about the user here? (preference, ongoing project, important personal detail). If yes, return it as a single short sentence. If no, respond with exactly "NULL".`,
-            },
-          ],
+          max_tokens: 150,
+          messages: [{ role: "user", content: systemPrompt }],
         }),
       });
 
-      const data = await response.json();
-      const result = data.content?.[0]?.text?.trim().replace(/^["']|["']$/g, "");
-      if (result && result.toUpperCase() !== "NULL") {
-        return result;
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.content?.[0]?.text?.trim();
+        if (text && text.toUpperCase() !== "NULL") {
+          try {
+            const parsed = JSON.parse(text);
+            return parsed;
+          } catch {
+            return { fact: text, category: "Preferences" };
+          }
+        }
       }
     }
   } catch (err) {

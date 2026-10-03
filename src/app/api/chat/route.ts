@@ -86,6 +86,9 @@ export async function POST(req: Request) {
   // advertises the current preference via the x-aide-memory header.
   const memoryDisabled = (req.headers.get("x-aide-memory") || "").toLowerCase() === "disabled";
 
+  // "ask" mode = send memory_pending SSE (user must confirm); "auto" = save immediately (legacy default)
+  const memoryMode = (req.headers.get("x-aide-memory-mode") || "ask").toLowerCase() as "ask" | "auto";
+
   // Retrieve relevant memories
   const relevantMemories = memoryDisabled
     ? []
@@ -530,15 +533,24 @@ export async function POST(req: Request) {
       if (!memoryDisabled && !finalAssistantText.startsWith("⚠️ Error")) {
         try {
           const extracted = await extractDurableFact(message, finalAssistantText);
-          if (extracted && extracted.toUpperCase() !== "NULL") {
-            const encrypted = encryptMemoryContent(extracted);
-            await userDb.memories.create({
-              content: encrypted,
-              memoryType: "fact",
-              sourceConversationId: conversationId,
-            });
-            sendSSE({ type: "memory_saved", content: extracted });
-            generateEmbedding(extracted).catch(() => {});
+          if (extracted && extracted.fact && extracted.fact.toUpperCase() !== "NULL") {
+            const factText = extracted.fact;
+            const category = extracted.category || "fact";
+
+            if (memoryMode === "auto") {
+              // Auto-save mode: write to DB immediately (legacy behaviour)
+              const encrypted = encryptMemoryContent(factText);
+              await userDb.memories.create({
+                content: encrypted,
+                memoryType: category,
+                sourceConversationId: conversationId,
+              });
+              sendSSE({ type: "memory_saved", content: factText, category });
+              generateEmbedding(factText).catch(() => {});
+            } else {
+              // Ask mode: push pending fact to client for user confirmation
+              sendSSE({ type: "memory_pending", content: factText, category, conversationId });
+            }
           }
         } catch (err) {
           console.error("Fact extraction failed:", err);
