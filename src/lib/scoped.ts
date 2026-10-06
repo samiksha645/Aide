@@ -112,6 +112,11 @@ export function getScopedDb(userId: string) {
             user: { connect: { id: userId } },
           },
         }),
+      update: (id: string, data: Prisma.MemoryUpdateInput) =>
+        db.memory.updateMany({
+          where: { id, userId },
+          data,
+        }),
       delete: (id: string) =>
         db.memory.deleteMany({
           where: { id, userId },

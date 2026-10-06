@@ -7,6 +7,8 @@ import { useRouter } from "next/navigation";
 import { Sidebar, Conversation } from "@/components/Sidebar";
 import { ChatArea, Message, ToolStep } from "@/components/ChatArea";
 import { SettingsModal } from "@/components/SettingsModal";
+import { ShortcutHelp } from "@/components/ShortcutHelp";
+import { DEFAULT_CHAT_MODE, isChatMode, type ChatMode } from "@/lib/chatModes";
 import dynamic from "next/dynamic";
 
 const AmbientScene = dynamic(
@@ -30,7 +32,11 @@ export default function Home() {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
+  // Which input a shortcut asked us to focus (applied after the next render)
+  const [focusTarget, setFocusTarget] = useState<"search" | "chat" | null>(null);
   const [model, setModel] = useState("aide-flash");
+  const [mode, setMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
   const abortRef = useRef<AbortController | null>(null);
 
   // Pending memory: fact waiting for user confirmation before being saved
@@ -141,6 +147,25 @@ export default function Home() {
     }
   }, []);
 
+  // Restore the selected chat mode (General / Coding / Interview / …)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("aide-chat-mode");
+      if (isChatMode(saved)) setMode(saved);
+    } catch {
+      // localStorage unavailable — keep the default
+    }
+  }, []);
+
+  const handleModeChange = useCallback((next: ChatMode) => {
+    setMode(next);
+    try {
+      localStorage.setItem("aide-chat-mode", next);
+    } catch {
+      // Ignore persistence failures
+    }
+  }, []);
+
   // Abort the in-flight chat request (Stop button)
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -158,7 +183,7 @@ export default function Home() {
     }
   }, []);
 
-  // Create a new conversation (New chat button + Ctrl+K shortcut)
+  // Create a new conversation (New chat button + Ctrl+N shortcut)
   const handleNewConversation = useCallback(async () => {
     if (status !== "authenticated" || hasAuthFailed) return;
     try {
@@ -177,24 +202,57 @@ export default function Home() {
     }
   }, [status, hasAuthFailed]);
 
-  // Global keyboard shortcuts: Ctrl+K new chat · Ctrl+B toggle sidebar · Esc close modals
+  // Global keyboard shortcuts
+  //   Ctrl+K search · Ctrl+N new chat · Ctrl+/ focus chat input · Ctrl+B sidebar · Esc close overlays
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === "k") {
+      const key = e.key.toLowerCase();
+
+      if (mod && key === "k") {
+        e.preventDefault();
+        // Make sure the (collapsible) sidebar is expanded so the search input exists
+        setIsSidebarCollapsed(false);
+        try {
+          localStorage.setItem("aide-sidebar-collapsed", "false");
+        } catch {
+          // Ignore persistence failures
+        }
+        // On small screens the sidebar lives in a drawer — open it so the input is visible
+        if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
+          setIsMobileSidebarOpen(true);
+        }
+        setFocusTarget("search");
+      } else if (mod && key === "n") {
         e.preventDefault();
         handleNewConversation();
-      } else if (mod && e.key.toLowerCase() === "b") {
+      } else if (mod && e.key === "/") {
+        e.preventDefault();
+        setFocusTarget("chat");
+      } else if (mod && key === "b") {
         e.preventDefault();
         toggleSidebarCollapsed();
       } else if (e.key === "Escape") {
         setIsSettingsOpen(false);
         setIsMobileSidebarOpen(false);
+        setIsShortcutsOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleNewConversation, toggleSidebarCollapsed]);
+
+  // Apply a pending shortcut focus request once the target input has rendered
+  useEffect(() => {
+    if (!focusTarget) return;
+    const id = focusTarget === "search" ? "aide-search-input" : "aide-chat-input";
+    const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+    if (el) {
+      el.focus();
+      if (el instanceof HTMLInputElement) el.select();
+    }
+    setFocusTarget(null);
+  }, [focusTarget, isSidebarCollapsed]);
 
   // Pin / unpin a conversation (optimistic, persisted via PATCH)
   const handleTogglePin = useCallback(async (id: string, pinned: boolean) => {
@@ -348,6 +406,7 @@ export default function Home() {
           "Content-Type": "application/json",
           "x-aide-memory": memoryEnabled ? "enabled" : "disabled",
           "x-aide-memory-mode": memoryMode,
+          "x-aide-mode": mode,
         },
         body: JSON.stringify({ conversationId: targetConvId, message: text }),
         signal: controller.signal,
@@ -526,12 +585,6 @@ export default function Home() {
   };
 
   const currentConversation = conversations.find((c) => c.id === activeId);
-  // Active conversation usage (from the loaded messages)
-  const conversationTokens = messages.reduce((sum, m) => sum + (m.tokenCount || 0), 0);
-  const conversationCost = messages.reduce((sum, m) => sum + (m.costUsd || 0), 0);
-  // Overall usage across all conversations (aggregated by /api/conversations)
-  const overallTokens = conversations.reduce((sum, c) => sum + (c.tokens || 0), 0);
-  const overallCost = conversations.reduce((sum, c) => sum + (c.cost || 0), 0);
 
   return (
     <div className="flex h-[100dvh] w-screen overflow-hidden bg-warmtaupe-base dark:bg-charcoal-950 font-sans relative antialiased p-0 md:p-2.5 gap-0 md:gap-2.5 transition-colors duration-300">
@@ -591,11 +644,14 @@ export default function Home() {
         isSidebarCollapsed={isSidebarCollapsed}
         onToggleSidebar={toggleSidebarCollapsed}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenShortcuts={() => setIsShortcutsOpen(true)}
         onStop={handleStop}
         onRegenerate={handleRegenerate}
         onEditMessage={handleEditMessage}
         model={model}
         onModelChange={handleModelChange}
+        mode={mode}
+        onModeChange={handleModeChange}
         pendingMemory={pendingMemory}
         onSaveMemory={handleSaveMemory}
         onDiscardMemory={handleDiscardMemory}
@@ -607,17 +663,10 @@ export default function Home() {
         onClose={() => setIsSettingsOpen(false)}
         userEmail={session?.user?.email}
         userName={session?.user?.name}
-        totalTokens={overallTokens}
-        totalCost={overallCost}
-        conversationTokens={conversationTokens}
-        conversationCost={conversationCost}
-        conversationUsage={conversations.map((c) => ({
-          id: c.id,
-          title: c.title,
-          tokens: c.tokens || 0,
-          cost: c.cost || 0,
-        }))}
       />
+
+      {/* 4. Keyboard shortcuts cheat sheet (the "?" button in the chat header) */}
+      <ShortcutHelp isOpen={isShortcutsOpen} onClose={() => setIsShortcutsOpen(false)} />
     </div>
   );
 }

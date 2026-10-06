@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { signOut } from "next-auth/react";
-import { useTheme, ThemeMode } from "@/context/ThemeContext";
+import { useTheme } from "@/context/ThemeContext";
 
 export interface MemoryItem {
   id: string;
@@ -16,26 +16,65 @@ interface SettingsModalProps {
   onClose: () => void;
   userEmail?: string | null;
   userName?: string | null;
-  totalTokens?: number;
-  totalCost?: number;
-  conversationTokens?: number;
-  conversationCost?: number;
-  conversationUsage?: { id: string; title: string; tokens: number; cost: number }[];
   onMemoriesUpdated?: () => void;
 }
 
 type TabType = "general" | "memory" | "usage" | "account";
+
+export type DailyBucket = { date: string; tokens: number };
+
+/** Small label/value row used by the Usage stat cards. */
+function StatRow({ label, value, green }: { label: string; value: string; green?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-xs">
+      <span className="text-stone-500 dark:text-stone-400">{label}</span>
+      <span
+        className={`font-mono tabular-nums ${
+          green ? "text-emerald-600 dark:text-emerald-400" : "text-stone-800 dark:text-stone-200"
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** Simple last-7-days token usage bar chart (no charting dependency). */
+function TokenBarChart({ data }: { data: DailyBucket[] }) {
+  const max = Math.max(1, ...data.map((d) => d.tokens));
+  const MAX_BAR_PX = 72;
+  return (
+    <div className="flex items-end justify-between gap-1.5 h-[124px] bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3">
+      {data.map((d) => {
+        const barPx = d.tokens > 0 ? Math.max(4, Math.round((d.tokens / max) * MAX_BAR_PX)) : 0;
+        return (
+          <div
+            key={d.date}
+            className="flex-1 min-w-0 h-full flex flex-col items-center justify-end gap-1"
+            title={`${d.date}: ${d.tokens.toLocaleString()} tokens`}
+          >
+            <span className="text-[9px] leading-none text-stone-500 dark:text-stone-400 tabular-nums">
+              {d.tokens > 0 ? d.tokens.toLocaleString() : ""}
+            </span>
+            <div
+              className="w-full max-w-[24px] bg-warmorange-500/85 dark:bg-warmorange-500 rounded-t-md transition-all"
+              style={{ height: `${barPx}px` }}
+            />
+            <span className="text-[9px] leading-none text-stone-400 dark:text-stone-500 whitespace-nowrap">
+              {d.date}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function SettingsModal({
   isOpen,
   onClose,
   userEmail,
   userName,
-  totalTokens = 0,
-  totalCost = 0,
-  conversationTokens = 0,
-  conversationCost = 0,
-  conversationUsage,
   onMemoriesUpdated,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<TabType>("general");
@@ -47,24 +86,30 @@ export function SettingsModal({
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [memoryMode, setMemoryMode] = useState<"ask" | "auto">("ask");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
+  const [editMemoryDraft, setEditMemoryDraft] = useState("");
+
+  // Usage stats state
+  type UsageStats = {
+    allTime: { totalConversations: number; totalMessages: number; totalTokens: number; totalCost: number };
+    today: { todayConversations: number; todayMessages: number; todayTokens: number; todayCost: number };
+    daily: DailyBucket[];
+  };
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [loadingUsage, setLoadingUsage] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("aide-memory-enabled");
-      if (saved !== null) {
-        setMemoryEnabled(saved === "true");
-      }
+      if (saved !== null) setMemoryEnabled(saved === "true");
       const savedMode = localStorage.getItem("aide-memory-mode") as "ask" | "auto";
-      if (savedMode === "ask" || savedMode === "auto") {
-        setMemoryMode(savedMode);
-      }
+      if (savedMode === "ask" || savedMode === "auto") setMemoryMode(savedMode);
     }
   }, []);
 
   useEffect(() => {
-    if (isOpen && activeTab === "memory") {
-      fetchMemories();
-    }
+    if (isOpen && activeTab === "memory") fetchMemories();
+    if (isOpen && activeTab === "usage") fetchUsageStats();
   }, [isOpen, activeTab]);
 
   const fetchMemories = async () => {
@@ -82,6 +127,18 @@ export function SettingsModal({
     }
   };
 
+  const fetchUsageStats = async () => {
+    setLoadingUsage(true);
+    try {
+      const res = await fetch("/api/usage");
+      if (res.ok) setUsageStats(await res.json());
+    } catch (err) {
+      console.error("Failed to load usage stats:", err);
+    } finally {
+      setLoadingUsage(false);
+    }
+  };
+
   const handleDeleteMemory = async (id: string) => {
     try {
       const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
@@ -94,6 +151,43 @@ export function SettingsModal({
     }
   };
 
+  const startEditMemory = (memory: MemoryItem) => {
+    setEditingMemoryId(memory.id);
+    setEditMemoryDraft(memory.content);
+  };
+
+  const cancelEditMemory = () => {
+    setEditingMemoryId(null);
+    setEditMemoryDraft("");
+  };
+
+  const handleUpdateMemory = async (id: string) => {
+    const content = editMemoryDraft.trim();
+    if (!content) return;
+    try {
+      const res = await fetch(`/api/memories/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        setMemories((prev) =>
+          prev.map((m) =>
+            m.id === id
+              ? { ...m, content, memoryType: data?.memory?.memoryType ?? m.memoryType }
+              : m
+          )
+        );
+        if (onMemoriesUpdated) onMemoriesUpdated();
+      }
+    } catch (err) {
+      console.error("Failed to update memory:", err);
+    } finally {
+      cancelEditMemory();
+    }
+  };
+
   const handleClearAllMemories = async () => {
     try {
       for (const m of memories) {
@@ -101,6 +195,7 @@ export function SettingsModal({
       }
       setMemories([]);
       setShowClearConfirm(false);
+      cancelEditMemory();
       if (onMemoriesUpdated) onMemoriesUpdated();
     } catch (err) {
       console.error("Failed to clear memories:", err);
@@ -365,16 +460,65 @@ export function SettingsModal({
                               key={m.id}
                               className="group bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3 text-xs flex justify-between items-start gap-2 transition"
                             >
-                              <span className="text-stone-800 dark:text-stone-200 leading-relaxed">{m.content}</span>
-                              <button
-                                onClick={() => handleDeleteMemory(m.id)}
-                                className="text-stone-400 hover:text-red-500 p-0.5 rounded transition shrink-0 opacity-0 group-hover:opacity-100"
-                                title="Delete memory"
-                              >
-                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                </svg>
-                              </button>
+                              {editingMemoryId === m.id ? (
+                                <div className="flex-1 space-y-1.5">
+                                  <textarea
+                                    autoFocus
+                                    value={editMemoryDraft}
+                                    onChange={(e) => setEditMemoryDraft(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleUpdateMemory(m.id);
+                                      } else if (e.key === "Escape") {
+                                        e.stopPropagation();
+                                        cancelEditMemory();
+                                      }
+                                    }}
+                                    rows={2}
+                                    className="w-full bg-white dark:bg-charcoal-800 border border-cream-300 dark:border-charcoal-750 rounded-lg px-2 py-1.5 text-xs text-stone-800 dark:text-stone-200 outline-none focus:border-warmorange-400 resize-none"
+                                  />
+                                  <div className="flex justify-end gap-2">
+                                    <button
+                                      onClick={cancelEditMemory}
+                                      className="px-2 py-1 rounded-md border border-stone-300 dark:border-charcoal-750 text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-charcoal-800 transition"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      onClick={() => handleUpdateMemory(m.id)}
+                                      disabled={!editMemoryDraft.trim()}
+                                      className="px-2 py-1 rounded-md bg-warmorange-500 hover:bg-warmorange-600 disabled:opacity-40 text-white font-medium transition"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <span className="text-stone-800 dark:text-stone-200 leading-relaxed">{m.content}</span>
+                                  <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+                                    <button
+                                      onClick={() => startEditMemory(m)}
+                                      className="text-stone-400 hover:text-warmorange-500 p-0.5 rounded transition"
+                                      title="Edit memory"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteMemory(m.id)}
+                                      className="text-stone-400 hover:text-red-500 p-0.5 rounded transition"
+                                      title="Delete memory"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                </>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -388,70 +532,54 @@ export function SettingsModal({
 
           {/* TAB 3: USAGE */}
           {activeTab === "usage" && (
-            <div className="space-y-6">
+            <div className="space-y-5 overflow-y-auto">
               <div>
-                <h3 className="text-base font-semibold text-stone-900 dark:text-stone-100">Session &amp; Chat Usage</h3>
-                <p className="text-xs text-stone-500 dark:text-stone-400 mt-1">
-                  Token counts and estimated API costs for your active sessions.
+                <h3 className="text-base font-semibold text-stone-900 dark:text-stone-100">Usage & Stats</h3>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  All-time and today&apos;s usage. Costs are <span className="italic">estimated</span> — actual billing may vary.
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 pt-2">
-                {/* Active Chat Usage */}
-                <div className="bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-4 space-y-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-warmorange-600 dark:text-warmorange-400 block">
-                    Active Conversation
-                  </span>
-                  <div className="space-y-1">
-                    <div className="text-xs text-stone-500 dark:text-stone-400 flex justify-between">
-                      <span>Tokens:</span>
-                      <strong className="font-mono text-stone-800 dark:text-stone-200">{conversationTokens.toLocaleString()}</strong>
+              {loadingUsage ? (
+                <div className="flex items-center justify-center h-24 text-stone-400 text-xs">
+                  <span className="w-2 h-2 rounded-full bg-warmorange-400 animate-ping mr-2"></span>
+                  Loading stats...
+                </div>
+              ) : usageStats ? (
+                <>
+                  {/* All-time vs Today grid */}
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* All-time */}
+                    <div className="bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3 space-y-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-500 dark:text-stone-400 block">All-time</span>
+                      <StatRow label="Conversations" value={usageStats.allTime.totalConversations.toLocaleString()} />
+                      <StatRow label="Messages sent" value={usageStats.allTime.totalMessages.toLocaleString()} />
+                      <StatRow label="Total tokens" value={usageStats.allTime.totalTokens.toLocaleString()} />
+                      <StatRow label="Est. cost (estimated)" value={`$${usageStats.allTime.totalCost.toFixed(4)}`} green />
                     </div>
-                    <div className="text-xs text-stone-500 dark:text-stone-400 flex justify-between">
-                      <span>Est. Cost:</span>
-                      <strong className="font-mono text-emerald-600 dark:text-emerald-400">${conversationCost.toFixed(6)}</strong>
+                    {/* Today */}
+                    <div className="bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-3 space-y-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-warmorange-500 dark:text-warmorange-400 block">Today</span>
+                      <StatRow label="Conversations" value={usageStats.today.todayConversations.toLocaleString()} />
+                      <StatRow label="Messages sent" value={usageStats.today.todayMessages.toLocaleString()} />
+                      <StatRow label="Total tokens" value={usageStats.today.todayTokens.toLocaleString()} />
+                      <StatRow label="Est. cost (estimated)" value={`$${usageStats.today.todayCost.toFixed(4)}`} green />
                     </div>
                   </div>
-                </div>
 
-                {/* Overall Session Usage */}
-                <div className="bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-xl p-4 space-y-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-600 dark:text-stone-300 block">
-                    Overall Session
-                  </span>
-                  <div className="space-y-1">
-                    <div className="text-xs text-stone-500 dark:text-stone-400 flex justify-between">
-                      <span>Total Tokens:</span>
-                      <strong className="font-mono text-stone-800 dark:text-stone-200">{totalTokens.toLocaleString()}</strong>
-                    </div>
-                    <div className="text-xs text-stone-500 dark:text-stone-400 flex justify-between">
-                      <span>Total Cost:</span>
-                      <strong className="font-mono text-emerald-600 dark:text-emerald-400">${totalCost.toFixed(6)}</strong>
-                    </div>
+                  {/* 7-day bar chart */}
+                  <div>
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400 block mb-2">
+                      Token usage — last 7 days
+                    </span>
+                    <TokenBarChart data={usageStats.daily} />
+                    <p className="text-[10px] text-stone-400 dark:text-stone-500 mt-2 leading-relaxed">
+                      Estimated cost uses published per-token pricing — your actual bill may differ.
+                    </p>
                   </div>
-                </div>
-              </div>
-
-              {/* Per-Conversation Breakdown */}
-              {conversationUsage && conversationUsage.length > 0 && (
-                <div>
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-600 dark:text-stone-300 block mb-2">
-                    Per Conversation
-                  </span>
-                  <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                    {conversationUsage.map((c) => (
-                      <div
-                        key={c.id}
-                        className="flex items-center justify-between gap-3 text-xs bg-cream-100 dark:bg-charcoal-850 border border-cream-300 dark:border-charcoal-750 rounded-lg px-3 py-2"
-                      >
-                        <span className="truncate text-stone-700 dark:text-stone-300">{c.title}</span>
-                        <span className="font-mono text-[11px] text-stone-500 dark:text-stone-400 shrink-0">
-                          {c.tokens.toLocaleString()} tok · ${c.cost.toFixed(6)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                </>
+              ) : (
+                <div className="text-center py-10 text-stone-400 dark:text-stone-500 text-xs">Could not load usage data.</div>
               )}
             </div>
           )}

@@ -490,7 +490,7 @@ export function Sidebar({
             className={`w-full flex items-center justify-center space-x-2 bg-charcoal-850 hover:bg-charcoal-800 focus-visible:bg-charcoal-800 focus-visible:ring-2 focus-visible:ring-warmorange-400/40 outline-none text-stone-100 text-xs font-medium py-2.5 px-3 rounded-full border border-stone-800 hover:border-stone-700 transition shadow-sm group ${
               isCollapsed ? "px-0 justify-center" : ""
             }`}
-            title="New chat (Ctrl+K)"
+            title="New chat (Ctrl+N)"
           >
             <svg className="w-4 h-4 text-warmorange-400 group-hover:rotate-90 transition-transform duration-200 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
@@ -507,13 +507,14 @@ export function Sidebar({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
               </svg>
               <input
+                id="aide-search-input"
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") setSearch("");
                 }}
-                placeholder="Search chats..."
+                placeholder="Search chats...  (Ctrl+K)"
                 aria-label="Search chats"
                 className="flex-1 min-w-0 bg-transparent text-xs text-stone-200 placeholder-stone-600 outline-none"
               />

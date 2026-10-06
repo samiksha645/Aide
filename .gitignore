@@ -40,3 +40,9 @@ next-env.d.ts
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# local scratch / test artifacts (do not commit)
+dev-out.txt
+test-document.pdf
+l*.txt
+t*.txt

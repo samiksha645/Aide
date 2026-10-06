@@ -9,9 +9,11 @@ import {
   extractDurableFact,
   encryptMemoryContent,
   generateEmbedding,
+  resolveMemoryCategory,
 } from "@/lib/memory";
 import { safeCalculate, executeWebSearch, executeSaveReminder } from "@/lib/tools";
 import { ChatInputSchema } from "@/lib/validation";
+import { chatModeInstruction } from "@/lib/chatModes";
 import { Ratelimit } from "@upstash/ratelimit";
 import { redis } from "@/lib/redis";
 
@@ -88,6 +90,10 @@ export async function POST(req: Request) {
 
   // "ask" mode = send memory_pending SSE (user must confirm); "auto" = save immediately (legacy default)
   const memoryMode = (req.headers.get("x-aide-memory-mode") || "ask").toLowerCase() as "ask" | "auto";
+
+  // Chat mode (General / Coding / ...) — adds a mode-specific system instruction.
+  // Returns "" for General, so the default assistant behaviour is unchanged.
+  const modeInstruction = chatModeInstruction(req.headers.get("x-aide-mode"));
 
   // Retrieve relevant memories
   const relevantMemories = memoryDisabled
@@ -241,11 +247,15 @@ export async function POST(req: Request) {
                   { role: "user", parts: [{ text: message }] },
                 ],
                 systemInstruction: {
-                  parts: [{ text: `You are Aide, a production-grade personal AI assistant. Be helpful, concise, and friendly. ${memoryContext}` }],
+                  parts: [{ text: `You are Aide, a production-grade personal AI assistant. Be helpful, concise, and friendly. ${modeInstruction} ${memoryContext}` }],
                 },
                 generationConfig: {
                   maxOutputTokens: 2048,
                   temperature: 0.7,
+                  // gemini-3.6-flash is a *thinking* model: its hidden reasoning is
+                  // billed against maxOutputTokens, so leaving it on starves the
+                  // visible reply (same fix as src/lib/interview.ts).
+                  thinkingConfig: { thinkingBudget: 0 },
                 },
               }),
             });
@@ -313,7 +323,7 @@ export async function POST(req: Request) {
               body: JSON.stringify({
                 model: "claude-3-5-sonnet-20240620",
                 max_tokens: 1024,
-                system: `You are Aide, a production-grade personal AI assistant. ${memoryContext}`,
+                system: `You are Aide, a production-grade personal AI assistant. ${modeInstruction} ${memoryContext}`,
                 messages: [...historyMessages, { role: "user", content: message }],
                 stream: true,
               }),
@@ -375,7 +385,7 @@ export async function POST(req: Request) {
               body: JSON.stringify({
                 model: "gpt-4o-mini",
                 messages: [
-                  { role: "system", content: `You are Aide personal AI assistant. ${memoryContext}` },
+                  { role: "system", content: `You are Aide personal AI assistant. ${modeInstruction} ${memoryContext}` },
                   ...historyMessages,
                   { role: "user", content: message },
                 ],
@@ -488,7 +498,13 @@ export async function POST(req: Request) {
                     ],
                   },
                 ],
-                generationConfig: { maxOutputTokens: 25, temperature: 0.4 },
+                generationConfig: {
+                  // Titles are only a few words: without this the hidden reasoning
+                  // pass eats all 25 tokens and the title comes back empty.
+                  maxOutputTokens: 25,
+                  temperature: 0.4,
+                  thinkingConfig: { thinkingBudget: 0 },
+                },
               }),
             });
             if (res.ok) {
@@ -535,7 +551,8 @@ export async function POST(req: Request) {
           const extracted = await extractDurableFact(message, finalAssistantText);
           if (extracted && extracted.fact && extracted.fact.toUpperCase() !== "NULL") {
             const factText = extracted.fact;
-            const category = extracted.category || "fact";
+            // Bucket the fact into Personal / Preferences / Interests for Settings → Memory
+            const category = resolveMemoryCategory(extracted.category, factText);
 
             if (memoryMode === "auto") {
               // Auto-save mode: write to DB immediately (legacy behaviour)

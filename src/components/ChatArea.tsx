@@ -3,6 +3,9 @@
 import React, { useState } from "react";
 import dynamic from "next/dynamic";
 import { MemoryPromptCard } from "./MemoryPromptCard";
+import { ModeSelector } from "./ModeSelector";
+import { InterviewMode } from "./InterviewMode";
+import type { ChatMode } from "@/lib/chatModes";
 
 // Dynamic import with ssr: false ensures WebGL / canvas code only executes in the browser
 const ThreeOrb = dynamic(
@@ -49,6 +52,8 @@ interface ChatAreaProps {
   isSidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
   onOpenSettings?: () => void;
+  /** Reveal the keyboard-shortcut cheat sheet (the small "?" header button) */
+  onOpenShortcuts?: () => void;
   /** Abort the in-flight request (Stop button) */
   onStop?: () => void;
   /** Regenerate an assistant response from its preceding user message */
@@ -62,6 +67,9 @@ interface ChatAreaProps {
   pendingMemory?: { fact: string; category: string; conversationId: string } | null;
   onSaveMemory?: (fact: string, category: string, conversationId: string) => void;
   onDiscardMemory?: (fact: string) => void;
+  /** Active chat mode (General / Coding / Study / Interview / Documents) */
+  mode?: ChatMode;
+  onModeChange?: (mode: ChatMode) => void;
 }
 
 import ReactMarkdown from "react-markdown";
@@ -202,13 +210,43 @@ const MODEL_OPTIONS = [
   { id: "demo", label: "Demo Mode", hint: "Simulated replies" },
 ] as const;
 
-/** Clickable suggestions shown in the empty state (fill the input on click) */
-const SUGGESTIONS = [
-  "Plan my study week",
-  "Explain a concept",
-  "Help me write an email",
-  "Brainstorm ideas",
-];
+/**
+ * Per-mode empty-state suggestions (clicking one fills the input) plus the
+ * composer placeholder. Interview Mode renders its own panel, so its entry
+ * is only a fallback.
+ */
+const MODE_UI: Record<ChatMode, { placeholder: string; suggestions: string[] }> = {
+  general: {
+    placeholder: "Ask Aide anything...",
+    suggestions: [
+      "Plan my study week",
+      "Explain a concept",
+      "Help me write an email",
+      "Brainstorm ideas",
+    ],
+  },
+  coding: {
+    placeholder: "Ask a coding question...",
+    suggestions: [
+      "Debug this function",
+      "Explain this error",
+      "Review my code",
+      "Write unit tests",
+    ],
+  },
+  interview: {
+    placeholder: "Ask Aide anything...",
+    suggestions: [],
+  },
+  study: {
+    placeholder: "Study a topic with Aide...",
+    suggestions: [],
+  },
+  documents: {
+    placeholder: "Ask about a document...",
+    suggestions: [],
+  },
+};
 
 /* Small ghost icon button used in the per-message hover action rows */
 function MessageAction({
@@ -286,6 +324,7 @@ export function ChatArea({
   isSidebarCollapsed = false,
   onToggleSidebar,
   onOpenSettings,
+  onOpenShortcuts,
   onStop,
   onRegenerate,
   onEditMessage,
@@ -294,7 +333,10 @@ export function ChatArea({
   pendingMemory,
   onSaveMemory,
   onDiscardMemory,
+  mode = "general",
+  onModeChange,
 }: ChatAreaProps) {
+  const modeUi = MODE_UI[mode];
   const [expandedMessageIds, setExpandedMessageIds] = React.useState<Record<string, boolean>>({});
 
   const toggleSteps = (id: string) => {
@@ -503,10 +545,15 @@ export function ChatArea({
           )}
 
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-500/15"></div>
-          <div>
+          <div className="flex items-center gap-2 min-w-0">
             <h2 className="font-semibold text-stone-800 dark:text-stone-100 text-sm tracking-tight truncate max-w-[180px] sm:max-w-xs md:max-w-md">
-              {conversationTitle}
+              {mode === "interview" ? "Interview Mode" : conversationTitle}
             </h2>
+            {mode === "interview" && (
+              <span className="hidden sm:inline text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-warmorange-500/15 text-warmorange-600 dark:text-warmorange-400">
+                🎤 Mock interview
+              </span>
+            )}
           </div>
         </div>
 
@@ -539,9 +586,26 @@ export function ChatArea({
               </svg>
             </button>
           )}
+
+          {/* Small, unobtrusive "?" that reveals the keyboard-shortcut list */}
+          {onOpenShortcuts && (
+            <button
+              onClick={onOpenShortcuts}
+              className="w-7 h-7 flex items-center justify-center rounded-full border border-cream-300 dark:border-charcoal-750 text-stone-400 dark:text-stone-500 hover:text-warmorange-500 dark:hover:text-warmorange-400 hover:border-warmorange-400 focus-visible:ring-2 focus-visible:ring-warmorange-400/40 outline-none transition text-xs font-semibold"
+              title="Keyboard shortcuts"
+              aria-label="Keyboard shortcuts"
+            >
+              ?
+            </button>
+          )}
         </div>
       </header>
 
+      {/* Interview Mode replaces the whole thread + composer while it is active */}
+      {mode === "interview" ? (
+        <InterviewMode mode={mode} onModeChange={onModeChange} />
+      ) : (
+        <>
       {/* Messages Scroll Thread — Single Centered Column (768px, ChatGPT / Claude style) */}
       <div className="relative flex-1 min-h-0">
         <div
@@ -569,7 +633,7 @@ export function ChatArea({
 
             {/* Clickable suggestion chips (fill the input) */}
             <div className="mt-6 flex flex-wrap justify-center gap-2">
-              {SUGGESTIONS.map((s) => (
+              {modeUi.suggestions.map((s) => (
                 <button
                   key={s}
                   onClick={() => {
@@ -820,8 +884,10 @@ export function ChatArea({
       {/* Input Bar Area at Bottom */}
       <div className="p-3 sm:p-4 pt-2 bg-gradient-to-t from-cream-100 dark:from-charcoal-900 via-cream-100/90 dark:via-charcoal-900/90 to-transparent shrink-0">
         <div className="max-w-3xl mx-auto">
-          {/* Model selector (small, just above the input) */}
-          <div className="relative inline-block mb-1.5">
+          {/* Mode + model selectors (small, just above the input) */}
+          <div className="relative flex items-center gap-2 mb-1.5">
+            <ModeSelector mode={mode} onModeChange={onModeChange} />
+            <div className="relative inline-block">
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -866,6 +932,7 @@ export function ChatArea({
                 ))}
               </div>
             )}
+            </div>
           </div>
 
           {/* Auto-growing composer (Enter to send, Shift+Enter for newline) */}
@@ -926,11 +993,12 @@ export function ChatArea({
 
               {/* Text input (auto-grows to ~6 lines) */}
               <textarea
+                id="aide-chat-input"
                 ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Aide anything..."
+                placeholder={modeUi.placeholder}
                 rows={1}
                 disabled={isStreaming}
                 className="flex-1 bg-transparent text-xs sm:text-sm text-stone-800 dark:text-stone-200 placeholder-stone-400 dark:placeholder-stone-500 outline-none resize-none overflow-y-auto max-h-[140px] py-1.5 leading-relaxed"
@@ -966,6 +1034,8 @@ export function ChatArea({
           </p>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

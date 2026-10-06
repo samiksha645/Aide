@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/authOptions";
 import { getScopedDb } from "@/lib/scoped";
-import { decryptMemoryContent, encryptMemoryContent, generateEmbedding } from "@/lib/memory";
+import {
+  decryptMemoryContent,
+  encryptMemoryContent,
+  generateEmbedding,
+  resolveMemoryCategory,
+} from "@/lib/memory";
 
 // GET /api/memories - List all user memories with decrypted content
 export async function GET() {
@@ -40,14 +45,17 @@ export async function POST(req: Request) {
 
   const userDb = getScopedDb(session.user.id);
   const encrypted = encryptMemoryContent(content.trim());
+  // Group the memory into Personal / Preferences / Interests — keep an explicit
+  // category when the client supplied one, otherwise infer it from the content.
+  const memoryType = resolveMemoryCategory(category, content);
   const memory = await userDb.memories.create({
     content: encrypted,
-    memoryType: category || "fact",
+    memoryType,
     sourceConversationId: conversationId || null,
   });
 
   // Fire-and-forget embedding generation
   generateEmbedding(content).catch(() => {});
 
-  return NextResponse.json({ memory: { ...memory, content: content.trim() } });
+  return NextResponse.json({ memory: { ...memory, content: content.trim(), memoryType } });
 }

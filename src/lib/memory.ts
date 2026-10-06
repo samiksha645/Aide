@@ -40,6 +40,54 @@ export function decryptMemoryContent(encryptedText: string): string {
   }
 }
 
+/** The three user-facing buckets shown under Settings → Memory. */
+export type MemoryCategory = "Personal" | "Preferences" | "Interests";
+
+export const MEMORY_CATEGORIES: MemoryCategory[] = ["Personal", "Preferences", "Interests"];
+
+/** True when a stored `memoryType` maps onto one of the three Settings → Memory buckets. */
+export function isMemoryCategory(value: unknown): value is MemoryCategory {
+  return typeof value === "string" && (MEMORY_CATEGORIES as string[]).includes(value);
+}
+
+// Keyword signals (checked in priority order) used to bucket a fact by its content.
+const PERSONAL_PATTERN =
+  /\b(my name is|name is|call me|i live in|live in|i work (?:at|for|as)|my (?:role|job|title|profession|age|birthday|timezone|pronouns|location|city|country)|i am (?:a|an|the)|i'm (?:a|an|the))\b/i;
+const PREFERENCES_PATTERN =
+  /\b(like|likes|love|loves|prefer|prefers|preference|preferences|favourite|favorite|dislike|hate|use|uses|using|tool|tools|style|format|concise|detailed|short answers|tone|respond|always|never|avoid)\b/i;
+const INTERESTS_PATTERN =
+  /\b(interested|curious|learning|studying|study|research|researching|exploring|hobby|hobbies|working on|building|project|topic|topics|goal|goals|reading|watching|playing|into)\b/i;
+
+/**
+ * Infer which bucket a durable memory belongs to from its content.
+ * Personal facts (identity / location) win, then explicit preferences, then interests.
+ * Falls back to "Interests" when no signal matches.
+ */
+export function inferMemoryCategory(content: string): MemoryCategory {
+  const text = (content || "").toLowerCase();
+  if (PERSONAL_PATTERN.test(text)) return "Personal";
+  if (PREFERENCES_PATTERN.test(text)) return "Preferences";
+  if (INTERESTS_PATTERN.test(text)) return "Interests";
+  return "Interests";
+}
+
+/**
+ * Resolve the `memoryType` value to persist when a memory is saved.
+ * - A supplied bucket category (case-insensitive) is normalised and kept.
+ * - Non-bucket types such as "reminder" are preserved so they still round-trip.
+ * - Otherwise the category is inferred from the fact's content.
+ */
+export function resolveMemoryCategory(provided: unknown, content: string): string {
+  if (typeof provided === "string" && provided.trim()) {
+    const trimmed = provided.trim();
+    const match = MEMORY_CATEGORIES.find((c) => c.toLowerCase() === trimmed.toLowerCase());
+    if (match) return match;
+    // Keep explicitly-typed non-bucket memories (e.g. "reminder") as-is.
+    if (trimmed.toLowerCase() !== "fact") return trimmed;
+  }
+  return inferMemoryCategory(content);
+}
+
 /**
  * Generate dummy 1536-dimensional embedding vector (or call OpenAI embeddings API)
  */
@@ -72,6 +120,34 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 }
 
 /**
+ * Turn a model's extraction reply into a `{ fact, category }` pair.
+ * Strips ```json fences (Gemini adds them even when told not to), returns null
+ * for "NULL"/empty replies, and never saves raw JSON or fence markup as a fact.
+ */
+export function parseExtractedFact(raw: string | undefined | null): { fact: string; category: string } | null {
+  if (!raw) return null;
+  const text = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  if (!text || text.toUpperCase() === "NULL") return null;
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.fact === "string" && parsed.fact.trim()) {
+      const fact = parsed.fact.trim();
+      return { fact, category: resolveMemoryCategory(parsed.category, fact) };
+    }
+    return null;
+  } catch {
+    // Plain-text reply: keep it only if it doesn't look like broken JSON.
+    if (text.startsWith("{") || text.startsWith("[")) return null;
+    return { fact: text, category: resolveMemoryCategory(undefined, text) };
+  }
+}
+
+/**
  * Lightweight heuristic extraction prompt
  */
 export async function extractDurableFact(userMessage: string, assistantMessage: string): Promise<{ fact: string, category: string } | null> {
@@ -81,8 +157,10 @@ export async function extractDurableFact(userMessage: string, assistantMessage: 
   const nameMatch = userMessage.match(/(?:my name is|name's|call me|i am)\s+([a-zA-Z]+)/i);
   if (nameMatch && nameMatch[1]) {
     const cleanName = nameMatch[1].trim();
-    const reservedWords = ["a", "an", "the", "ready", "here", "fine", "good", "happy", "sorry", "tired", "using", "testing", "sure", "ok", "okay"];
-    if (!reservedWords.includes(cleanName.toLowerCase())) {
+    const reservedWords = ["a", "an", "the", "ready", "here", "fine", "good", "happy", "sorry", "tired", "using", "testing", "sure", "ok", "okay", "from", "in", "on", "not", "just", "also", "so", "very", "new", "going", "trying", "looking"];
+    // "I am learning / building / working ..." is a status, not a name.
+    const looksLikeVerbForm = /ing$/i.test(cleanName) && cleanName.length > 4;
+    if (!reservedWords.includes(cleanName.toLowerCase()) && !looksLikeVerbForm) {
       const formattedName = cleanName.charAt(0).toUpperCase() + cleanName.slice(1);
       return { fact: `User's name is ${formattedName}`, category: "Personal" };
     }
@@ -123,21 +201,19 @@ If no, respond with exactly "NULL". Do not use markdown blocks.`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
-          generationConfig: { maxOutputTokens: 150, temperature: 0.2 },
+          generationConfig: {
+            // Without this the hidden reasoning pass consumes the 150-token budget
+            // and the fact comes back truncated (e.g. "- Lives"), so JSON.parse fails.
+            maxOutputTokens: 150,
+            temperature: 0.2,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (text && text.toUpperCase() !== "NULL") {
-          try {
-            const parsed = JSON.parse(text);
-            return parsed;
-          } catch {
-            return { fact: text, category: "Preferences" };
-          }
-        }
+        return parseExtractedFact(data.candidates?.[0]?.content?.parts?.[0]?.text);
       }
     } else if (process.env.ANTHROPIC_API_KEY) {
       const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -156,15 +232,7 @@ If no, respond with exactly "NULL". Do not use markdown blocks.`;
 
       if (response.ok) {
         const data = await response.json();
-        const text = data.content?.[0]?.text?.trim();
-        if (text && text.toUpperCase() !== "NULL") {
-          try {
-            const parsed = JSON.parse(text);
-            return parsed;
-          } catch {
-            return { fact: text, category: "Preferences" };
-          }
-        }
+        return parseExtractedFact(data.content?.[0]?.text);
       }
     }
   } catch (err) {
